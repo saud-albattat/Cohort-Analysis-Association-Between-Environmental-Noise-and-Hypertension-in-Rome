@@ -1,4 +1,4 @@
-Environmental Epidemiology Mini-Project
+Environmental Epidemiology Project
 ================
 Saud Hamad
 2025-12-31
@@ -1166,3 +1166,4 @@ vif(cox_noise_night_air_bs)
     ## exercise                 1.019732  3        1.003262
     ## bmi_bs                   1.012254  1        1.006108
     ## open_windows_bs          1.009623  1        1.004800
+
