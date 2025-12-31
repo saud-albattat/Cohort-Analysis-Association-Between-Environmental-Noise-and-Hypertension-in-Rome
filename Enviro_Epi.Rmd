@@ -1,0 +1,328 @@
+---
+title: "Environmental Epidemiology Mini-Project"
+subtitle: "Cohort Analysis: Association Between Environmental Noise and Hypertension in Rome"
+author: "Saud Hamad"
+output: 
+  github_document:
+    toc: true
+date: "2025-12-31"
+---
+
+1. Project Overview
+This project analyzes the association between environmental noise exposure (road traffic and aircraft noise) and the incidence of hypertension in a cohort based in Rome. The analysis follows a standard epidemiological workflow:
+
+- Descriptive Statistics: Baseline characteristics of the cohort.
+
+- Exploratory Data Analysis: Distribution of noise exposure and correlations.
+
+- Survival Analysis: Kaplan-Meier estimates for hypertension-free survival.
+
+- Cox Proportional Hazards Modeling: Estimating Hazard Ratios (HR) for different noise sources while adjusting for confounders (Age, BMI, Smoking, etc.).
+
+- Diagnostics: Verifying model assumptions.
+
+# **Data Dictionary**
+
+The following variables are used in this analysis:
+
+| Variable | Description |
+|:---|:---|
+| `ht_incid` | Incident Hypertension (1 = Yes, 0 = No) |
+| `time_ht` | Time to event (months) |
+| `noise_night_air_bs` | Night-time aircraft noise level (dB) at baseline |
+| `noise_day_air_bs` | Day-time aircraft noise level (dB) at baseline |
+| `noise_allday_road_bs`| All-day road traffic noise level (dB) at baseline |
+| `age` | Age in years |
+| `gender` | Participant gender (Female or Male) |
+| `bmi_bs` | Body Mass Index (kg/m²) at baseline |
+| `smoke_bs` | Binary variable (yes/no) on whether the participant was a smoker at baseline. |
+| `alcohol_bs` | Alcohol consumption (units/week) at baseline |
+| `saltconsumption_bs` | Frequency of adding salt at the table |
+| `education_bs` | Highest education level attained (4 categories) |
+| `exercise` | Frequency of physical activity (Never to >3 times/week) |
+| `open_windows_bs` | Habitual window opening behavior (Yes or No) |
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## **Load Packages**
+
+```{r}
+# 1. Install / Load necessary libraries
+packages <- c("tidyverse", "survival", "survminer", "broom", "readr", "car", "tableone", "corrplot")
+
+# Check and install missing packages
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+# Load libraries
+library(tidyverse)
+library(survival)
+library(survminer)
+library(broom)
+library(readr)
+library(car)
+library(tableone)
+library(corrplot)
+```
+
+## **Load Raw Data**
+
+```{r}
+# 2. Data Import and Initial Inspection
+home.dir <- paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/")
+data <- read_csv(paste0(home.dir, "CohortDataRome.csv"))
+# View structure and summary
+glimpse(data) # Data Glimpse
+summary(data) # Data summary
+str(data)     # Data structure
+```
+
+## **Table 1**
+
+```{r}
+# Define variables
+vars <- c("gender", "age", "smoke_bs", "alcohol_bs", "saltconsumption_bs",
+          "noise_night_air_bs", "noise_allday_road_bs", "noise_day_air_bs",
+          "education_bs", "bmi_bs", "exercise", "open_windows_bs",
+          "median_follow_up")
+
+catVars <- c("gender", "smoke_bs", "education_bs", "exercise", "open_windows_bs")
+
+# Create Table 1
+tbl1_t1 <- CreateTableOne(vars = vars, data = data, factorVars = catVars,
+                          includeNA = TRUE)
+
+# Print Table 1
+print(tbl1_t1, exact = "stage", quote = FALSE, noSpaces = TRUE, showAllLevels = TRUE)
+
+# Calculate follow-up mean and SD
+mean_follow_up <- mean(data$time_ht / 12)
+sd_follow_up <- sd(data$time_ht / 12)
+```
+
+## **Clean Data and Recode Factors**
+
+```{r}
+# 3. Data Cleaning and Recoding
+data <- data %>%
+  filter(!is.na(noise_allday_road_bs) & !is.na(age) & !is.na(alcohol_bs) & !is.na(bmi_bs)) %>%
+  mutate(
+    gender             = factor(gender, levels = c("female", "male")),
+    smoke_bs           = factor(smoke_bs, levels = c("no", "yes"), labels = c("Non-smoker", "Smoker")),
+    open_windows_bs    = ifelse(open_windows_bs == "1", "Yes", "No"),
+    education_bs       = factor(education_bs, levels = c("12 years or less", "12-15 years", "15-18 years", "19 years or more")),
+    exercise           = factor(exercise, levels = c("Never", "Once a week or less", "1-3 times a week", "3 times a week or more"), ordered = TRUE)
+  )
+
+data$ht_incid <- as.numeric(data$ht_incid)
+
+# Relevel and set contrasts
+data$education_bs <- relevel(data$education_bs, ref = "12 years or less")
+contrasts(data$education_bs) <- "contr.treatment"
+data$exercise <- factor(data$exercise, ordered = FALSE)
+data$exercise <- relevel(data$exercise, ref = "Never")
+contrasts(data$exercise) <- "contr.treatment"
+```
+
+## **Descriptive Statistics & EDA** & **Correlation Analysis of Numeric Variables**
+
+```{r}
+# 4. Install/load corrplot if needed
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+
+# Create numeric versions of ordered factors
+data <- data %>%
+  mutate(
+    exercise_num   = as.integer(exercise) - 1,
+    education_num  = as.integer(education_bs) - 1,
+    age            = as.numeric(age),
+    alcohol_bs     = as.numeric(alcohol_bs),
+    bmi_bs         = as.numeric(bmi_bs),
+    noise_night_air_bs  = as.numeric(noise_night_air_bs),
+    noise_allday_road_bs= as.numeric(noise_allday_road_bs),
+    noise_day_air_bs    = as.numeric(noise_day_air_bs)
+  )
+
+# 5. Exploratory analysis
+# Summary table by incident HT
+data %>%
+  group_by(ht_incid) %>%
+  summarise(
+    n = n(), # Count
+    mean_age = mean(age), # Mean age
+    prop_female = mean(gender == "female"), # Proportion female
+    mean_bmi = mean(bmi_bs) # Mean BMI
+  )
+
+# Histograms of noise exposures
+ggplot(data, aes(noise_night_air_bs)) + geom_histogram(binwidth = 2)
+ggplot(data, aes(noise_allday_road_bs)) + geom_histogram(binwidth = 2)
+ggplot(data, aes(noise_day_air_bs)) + geom_histogram(binwidth = 2)
+
+# Correlation plot of numeric variables
+num_vars <- data %>% select(age, alcohol_bs, bmi_bs,
+                            noise_night_air_bs, noise_allday_road_bs,
+                            noise_day_air_bs, exercise_num, education_num)
+corr_mat <- cor(num_vars, use = "complete.obs")
+corrplot(corr_mat, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45, addCoef.col = "black", number.cex = 0.7, diag = FALSE)
+
+# T-tests for noise exposures by HT incidence
+t.test(data$noise_allday_road_bs ~ data$ht_incid)
+t.test(data$noise_day_air_bs ~ data$ht_incid)
+t.test(data$noise_night_air_bs ~ data$ht_incid)
+```
+
+## **Survival Analysis (Kaplan-Meier)**
+
+```{r}
+# 4. Kaplan-Meier analysis ----
+
+# Create survival object
+surv_obj <- with(data, Surv(time_ht, ht_incid))
+
+# Overall Kaplan-Meier fit
+km_all <- survfit(surv_obj ~ 1)
+km_summary <- summary(km_all)
+
+# Plot Kaplan-Meier curve
+ggsurvplot(
+  km_all, data = data, risk.table = TRUE, conf.int = TRUE,
+  xlab = "Time to Hypertension (months)",
+  ylab = "Hypertension-free Survival",
+  ggtheme = theme_minimal(), # Use a minimal theme
+  palette = "Dark2", # Use a color palette
+  risk.table.height = 0.25, # Adjust risk table height
+  risk.table.y.text.col = TRUE, # Color risk table text
+  risk.table.y.text = FALSE, # Hide y-axis text in risk table
+  legend.title = "Survival Curve",
+  legend.labs = "Overall",
+  font.main = c(16, "bold", "darkblue"), # Customize main title font
+  font.x = c(14, "bold.italic", "darkred"), # Customize x-axis font
+  font.y = c(14, "bold.italic", "darkred"), # Customize y-axis font
+  font.tickslab = c(12, "plain", "black") # Customize tick labels font
+)
+```
+
+## **Cox Proportional Hazards Models**
+
+```{r}
+# 6. Cox proportional hazards models ----
+
+# Noise variables
+noise_vars <- c("noise_night_air_bs", "noise_day_air_bs", "noise_allday_road_bs")
+
+# Cox model for night air noise
+cox_noise_night_air_bs <- coxph(surv_obj ~ I(noise_night_air_bs / 10) + age + gender + education_bs + smoke_bs + alcohol_bs + 
+                                  saltconsumption_bs + exercise + bmi_bs + open_windows_bs, data = data)
+
+# Cox model for day air noise
+cox_noise_day_air_bs <- coxph(surv_obj ~ I(noise_day_air_bs / 10) + age + gender + education_bs + smoke_bs + alcohol_bs + 
+                                saltconsumption_bs + exercise + bmi_bs + open_windows_bs, data = data)
+
+# Cox model for all-day road noise
+cox_noise_allday_road_bs <- coxph(surv_obj ~ I(noise_allday_road_bs / 10) + age + gender + education_bs + smoke_bs + alcohol_bs + 
+                                    saltconsumption_bs + exercise + bmi_bs + open_windows_bs, data = data)
+
+# Summaries for each Cox model
+summary(cox_noise_allday_road_bs)
+summary(cox_noise_day_air_bs)
+summary(cox_noise_night_air_bs)
+
+# Store models in a list
+models_cont <- list(noise_night_air_bs = cox_noise_night_air_bs,
+                    noise_day_air_bs = cox_noise_day_air_bs,
+                    noise_allday_road_bs = cox_noise_allday_road_bs)
+
+# Create tidy models
+tidy_model_night <- tidy(models_cont$noise_night_air_bs, exponentiate = TRUE, conf.int = TRUE)
+tidy_model_day <- tidy(models_cont$noise_day_air_bs, exponentiate = TRUE, conf.int = TRUE)
+tidy_model_allday <- tidy(models_cont$noise_allday_road_bs, exponentiate = TRUE, conf.int = TRUE)
+```
+
+## **Helper Function for Forest Plots**
+
+```{r}
+# Variable descriptions
+labels <- c(
+  "I(noise_night_air_bs/10)"        = "Night-time aircraft noise (per 10 dB)",
+  "I(noise_day_air_bs/10)"          = "Day-time aircraft noise (per 10 dB)",
+  "I(noise_allday_road_bs/10)"      = "All-day road noise (per 10 dB)",
+  "age"                             = "Age",
+  "gendermale"                      = "Gender: male vs female",
+  "education_bs12-15 years"         = "Education: 12–15 y vs ≤12 y",
+  "education_bs15-18 years"         = "Education: 15–18 y vs ≤12 y",
+  "education_bs19 years or more"    = "Education: ≥19 y vs ≤12 y",
+  "smoke_bsSmoker"                  = "Smoking (current)",
+  "alcohol_bs"                      = "Alcohol units / week",
+  "saltconsumption_bssometimes,seldom.never add salt at the table"
+  = "Adds salt (seldom/never) vs always",
+  "exerciseOnce a week or less"     = "Exercise ≤1×/week vs never",
+  "exercise1-3 times a week"        = "Exercise 1–3×/week vs never",
+  "exercise3 times a week or more"  = "Exercise ≥3×/week vs never",
+  "bmi_bs"                          = "Body-mass index",
+  "open_windows_bsYes"              = "Habitual window-opening"
+)
+
+# Function to create forest plot
+create_forest_plot <- function(tidy_model, title){
+  tidy_model %>%
+    filter(term != "(Intercept)") %>%
+    mutate(
+      term  = ifelse(term %in% names(labels), labels[term], term),
+      color = ifelse(p.value < 0.05, "blue", "red")
+    ) %>%
+    ggplot(aes(estimate, term, color = color)) +
+    geom_point() +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+    geom_vline(xintercept = 1, linetype = "dashed") +
+    scale_color_identity() +
+    labs(x = "Hazard ratio (per 10 dB)", y = NULL, title = title) +
+    theme_minimal() +
+    scale_color_identity() +
+    geom_text(aes(label = round(p.value, 3)), x = 0.3, hjust = -0.2) +
+    xlim(min(tidy_model$conf.low, na.rm = TRUE) - 0.3, max(tidy_model$conf.high, na.rm = TRUE) + 0.3) +
+    theme(legend.position = "bottom") +
+    guides(color = guide_legend(override.aes = list(color = c("blue", "red")), title = "Significance: ")) +
+    scale_color_manual(values = c("blue" = "blue", "red" = "red"), labels = c("Significant", "Not Significant"))
+}
+
+# Create forest plots
+create_forest_plot(tidy_model_night, "Night-Air Analysis")
+create_forest_plot(tidy_model_day, "Day-Air Analysis")
+create_forest_plot(tidy_model_allday, "Allday-Road Analysis")
+```
+
+## **Visualize Model Results (Forest Plots)**
+
+```{r}
+# 7. Diagnostics ----
+
+# Diagnostics for noise_night_air_bs
+cox.zph(models_cont$noise_night_air_bs) # Proportional hazards test
+ggcoxzph(cox.zph(models_cont$noise_night_air_bs)) # Plot proportional hazards
+ggcoxdiagnostics(models_cont$noise_night_air_bs, type = "dfbeta") # DFBeta plot
+ggcoxdiagnostics(models_cont$noise_night_air_bs, type = "deviance") # Deviance plot
+
+# Diagnostics for noise_day_air_bs
+cox.zph(models_cont$noise_day_air_bs) # Proportional hazards test
+ggcoxzph(cox.zph(models_cont$noise_day_air_bs)) # Plot proportional hazards
+ggcoxdiagnostics(models_cont$noise_day_air_bs, type = "dfbeta") # DFBeta plot
+ggcoxdiagnostics(models_cont$noise_day_air_bs, type = "deviance") # Deviance plot
+
+# Diagnostics for noise_allday_road_bs
+cox.zph(models_cont$noise_allday_road_bs) # Proportional hazards test
+ggcoxzph(cox.zph(models_cont$noise_allday_road_bs)) # Plot proportional hazards
+ggcoxdiagnostics(models_cont$noise_allday_road_bs, type = "dfbeta") # DFBeta plot
+ggcoxdiagnostics(models_cont$noise_allday_road_bs, type = "deviance") # Deviance plot
+
+# VIF for the design matrix
+vif(cox_noise_allday_road_bs) # Calculate VIF
+vif(cox_noise_day_air_bs)
+vif(cox_noise_night_air_bs)
+```
+
